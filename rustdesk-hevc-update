@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Install the latest HEVC-enabled RustDesk .deb built by this repo's workflow.
+# Usage: rustdesk-hevc-update [--force]
+set -euo pipefail
+
+REPO="${RUSTDESK_HEVC_REPO:-TheRealEminem/rustdesk-hevc}"
+MARKER=/usr/share/rustdesk/.hevc-build
+
+release=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")
+tag=$(python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])' <<<"$release")
+url=$(python3 -c 'import sys,json; print(next(a["browser_download_url"] for a in json.load(sys.stdin)["assets"] if a["name"].endswith(".deb")))' <<<"$release")
+
+installed=$(cat "$MARKER" 2>/dev/null || echo "stock/none")
+echo "Installed: $installed"
+echo "Latest:    $tag"
+if [ "$installed" = "$tag" ] && [ "${1:-}" != "--force" ]; then
+  echo "Already up to date."
+  exit 0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+echo "Downloading $url"
+curl -fL --progress-bar -o "$tmp/rustdesk.deb" "$url"
+chmod 644 "$tmp/rustdesk.deb"
+
+echo "Installing (an active RustDesk session will drop and need to reconnect)..."
+sudo apt-get install -y --allow-downgrades "$tmp/rustdesk.deb"
+echo "$tag" | sudo tee "$MARKER" >/dev/null
+sudo systemctl restart rustdesk
+echo "Done: $tag installed."

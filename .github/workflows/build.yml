@@ -1,0 +1,220 @@
+name: Build RustDesk with HEVC VA-API
+
+# Daily: if upstream RustDesk has a new release we haven't built, build it
+# with hwcodec's hevc_vaapi encoder re-enabled and publish the .deb as a
+# release named "<tag>-hevc".
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "RustDesk tag to build (blank = latest release)"
+        required: false
+      force:
+        description: "Rebuild even if a release already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          TAG="$INPUT_TAG"
+          [ -z "$TAG" ] && TAG=$(gh api repos/rustdesk/rustdesk/releases/latest -q .tag_name)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" != "true" ] && gh release view "$TAG-hevc" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Already built $TAG-hevc"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Will build $TAG"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+    defaults:
+      run:
+        shell: bash
+        working-directory: rustdesk
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Free disk space
+        working-directory: .
+        run: |
+          sudo rm -rf /opt/ghc /usr/local/lib/android /usr/share/dotnet
+          sudo mkdir -p /opt/artifacts && sudo chown -R "$USER" /opt/artifacts
+          df -h /
+
+      - name: Add swap
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
+        with:
+          swap-size-gb: 12
+
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: hevc
+
+      - name: Checkout RustDesk ${{ env.TAG }}
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.TAG }}
+          path: rustdesk
+          submodules: recursive
+
+      # Read toolchain pins from upstream's own workflows so version bumps
+      # in new releases are picked up automatically.
+      - name: Read upstream version pins
+        run: |
+          pin() { grep -m1 -E "^\s*$1:" ".github/workflows/$2" | sed -E 's/^[^:]*:\s*"?([^"#]*)"?.*/\1/' | xargs; }
+          {
+            echo "RUST_VERSION=$(pin RUST_VERSION flutter-build.yml)"
+            echo "FLUTTER_VERSION=$(pin FLUTTER_VERSION flutter-build.yml)"
+            echo "VCPKG_COMMIT_ID=$(pin VCPKG_COMMIT_ID flutter-build.yml)"
+            echo "VERSION=$(pin VERSION flutter-build.yml)"
+            echo "FRB_VERSION=$(pin FLUTTER_RUST_BRIDGE_VERSION bridge.yml)"
+            echo "CARGO_EXPAND_VERSION=$(pin CARGO_EXPAND_VERSION bridge.yml)"
+            echo "BRIDGE_FLUTTER_VERSION=$(grep -m1 -oE 'flutter-version: "[0-9.]+"' .github/workflows/bridge.yml | grep -oE '[0-9.]+')"
+          } | tee -a "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential clang cmake curl gcc git g++ \
+            libayatana-appindicator3-dev libasound2-dev libclang-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgtk-3-dev libpam0g-dev libpulse-dev libva-dev \
+            libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev llvm-dev nasm ninja-build \
+            pkg-config python3 unzip wget xz-utils libssl-dev
+          # RustDesk links its own libopus from vcpkg.
+          sudo apt-get remove -y libopus-dev || true
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+
+      - name: Re-enable hevc_vaapi in hwcodec
+        run: |
+          REV=$(grep -A2 '^name = "hwcodec"' Cargo.lock | sed -nE 's/.*hwcodec#([0-9a-f]+)".*/\1/p')
+          echo "hwcodec rev: $REV"
+          git clone https://github.com/rustdesk-org/hwcodec /tmp/hwcodec-hevc
+          git -C /tmp/hwcodec-hevc checkout "$REV"
+          python3 ../hevc/patch_hwcodec.py /tmp/hwcodec-hevc/src/ffmpeg_ram/encode.rs
+          printf '\n[patch."https://github.com/rustdesk-org/hwcodec"]\nhwcodec = { path = "/tmp/hwcodec-hevc" }\n' >> Cargo.toml
+          cargo update -p hwcodec
+          cargo tree -i hwcodec --features hwcodec,flutter | head -1 | tee /dev/stderr | grep -q '/tmp/hwcodec-hevc'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rustdesk
+          prefix-key: hevc-${{ env.RUST_VERSION }}
+
+      # --- flutter_rust_bridge codegen (mirrors upstream bridge.yml) ---
+      - name: Install Flutter ${{ env.BRIDGE_FLUTTER_VERSION }} for bridge codegen
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+
+      - name: Generate flutter-rust bridge
+        run: |
+          cargo install cargo-expand --version "$CARGO_EXPAND_VERSION" --locked
+          cargo install flutter_rust_bridge_codegen --version "$FRB_VERSION" --features uuid --locked
+          # Same pubspec tweak upstream applies for the older bridge Flutter.
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          (cd flutter && flutter pub get)
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          # Undo the codegen-only pubspec tweak before the real Flutter build.
+          git checkout -- flutter/pubspec.yaml
+          git checkout -- flutter/pubspec.lock 2>/dev/null || true
+          ls -l src/bridge_generated*.rs flutter/lib/generated_bridge*.dart
+
+      # --- vcpkg (FFmpeg etc.) ---
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: |
+          if ! "$VCPKG_ROOT/vcpkg" install --triplet x64-linux --x-install-root="$VCPKG_ROOT/installed"; then
+            find "$VCPKG_ROOT/buildtrees" -name "*.log" -exec tail -n 50 {} + || true
+            exit 1
+          fi
+
+      # --- Rust library ---
+      - name: Build librustdesk
+        run: |
+          export VCPKG_ROOT=/opt/artifacts/vcpkg
+          sed -i 's/\["cdylib", "staticlib", "rlib"\]/["cdylib"]/g' Cargo.toml
+          cargo build --lib --features hwcodec,flutter,unix-file-copy-paste --release
+
+      # --- Flutter app + .deb ---
+      - name: Build Flutter app and .deb
+        run: |
+          pushd "$RUNNER_TEMP"
+          wget -q "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+          tar xf "flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+          popd
+          git config --global --add safe.directory '*'
+          if [ "$FLUTTER_VERSION" = "3.24.5" ] && [ -f .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff ]; then
+            (cd "$RUNNER_TEMP/flutter" && git apply "$GITHUB_WORKSPACE/rustdesk/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff")
+          fi
+          # Put the release Flutter ahead of the bridge-codegen Flutter on PATH.
+          export PATH=$RUNNER_TEMP/flutter/bin:$PATH
+          flutter --version
+          export CARGO_INCREMENTAL=0 DEB_ARCH=amd64
+          python3 ./build.py --flutter --skip-cargo
+          ls -l rustdesk*.deb
+          DEB=$(ls rustdesk*.deb | head -1)
+          mv "$DEB" "rustdesk-${VERSION}-x86_64-hevc.deb"
+          dpkg-deb -c "rustdesk-${VERSION}-x86_64-hevc.deb" | grep -q 'usr/share/rustdesk/lib/librustdesk.so'
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$TAG-hevc" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG-hevc" "rustdesk-${VERSION}-x86_64-hevc.deb" \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "RustDesk $TAG (HEVC VA-API)" \
+            --notes "Upstream RustDesk $TAG built with hwcodec's hevc_vaapi encoder re-enabled on Linux."
