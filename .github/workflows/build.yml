@@ -137,6 +137,7 @@ jobs:
           echo "hwcodec rev: $REV"
           git clone https://github.com/rustdesk-org/hwcodec /tmp/hwcodec-hevc
           git -C /tmp/hwcodec-hevc checkout "$REV"
+          git -C /tmp/hwcodec-hevc submodule update --init --recursive
           python3 ../hevc/patch_hwcodec.py /tmp/hwcodec-hevc/src/ffmpeg_ram/encode.rs
           printf '\n[patch."https://github.com/rustdesk-org/hwcodec"]\nhwcodec = { path = "/tmp/hwcodec-hevc" }\n' >> Cargo.toml
           cargo update -p hwcodec
