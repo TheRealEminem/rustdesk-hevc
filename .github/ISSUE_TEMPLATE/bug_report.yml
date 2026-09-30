@@ -1,0 +1,55 @@
+name: HEVC or build problem
+description: H.265 isn't used, looks worse than H.264, install failed, or a release build is missing/broken.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project only changes one thing: it re-enables the `hevc_vaapi` encoder.
+        If the problem also happens on stock RustDesk, please report it upstream instead.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem?
+      options:
+        - H.265 is not being used
+        - H.265 looks worse than H.264
+        - Install or update failed
+        - No release for a new RustDesk version / build is failing
+        - Works on a GPU/setup not listed in the README (good news!)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Release installed
+      description: Output of `cat /usr/share/rustdesk/.hevc-build`
+      placeholder: 1.4.9-hevc
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: e.g. AMD Radeon RX 6600 / Intel UHD 770, Mesa version, distro
+    validations:
+      required: true
+  - type: textarea
+    id: vainfo
+    attributes:
+      label: vainfo output
+      description: Output of `vainfo` (run on the host machine)
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Encoder log lines
+      description: |
+        Run on the host after connecting:
+        `grep -hE 'used preference|new encoder|hevc|vaapi' ~/.local/share/logs/RustDesk/server/rustdesk_rCURRENT.log | tail -20`
+      render: text
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened?
+    validations:
+      required: true

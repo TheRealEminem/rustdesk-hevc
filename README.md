@@ -88,7 +88,8 @@ is published, rather than shipping a build without HEVC.
 ## License and source
 
 RustDesk is licensed under the [AGPL-3.0](https://github.com/rustdesk/rustdesk/blob/master/LICENSE),
-and so are these binaries. The complete source for any release is the upstream tag of the
+and so are the `.deb` binaries released here. The scripts and workflows in this repository
+(everything you see in the file list) are [MIT](LICENSE). The complete source for any release is the upstream tag of the
 same version number plus the one-block change in `patch_hwcodec.py`.
 
 ## Limitations
