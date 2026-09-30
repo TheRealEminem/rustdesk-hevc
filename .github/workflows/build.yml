@@ -52,6 +52,8 @@ jobs:
     if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    outputs:
+      deb: ${{ steps.pkg.outputs.deb }}
     env:
       TAG: ${{ needs.check.outputs.tag }}
       VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -195,6 +197,7 @@ jobs:
 
       # --- Flutter app + .deb ---
       - name: Build Flutter app and .deb
+        id: pkg
         run: |
           pushd "$RUNNER_TEMP"
           wget -q "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
@@ -214,13 +217,84 @@ jobs:
           mv "$DEB" "rustdesk-${VERSION}-x86_64-hevc.deb"
           dpkg-deb -c "rustdesk-${VERSION}-x86_64-hevc.deb" > "$RUNNER_TEMP/deb-contents.txt"
           grep 'usr/share/rustdesk/lib/librustdesk.so' "$RUNNER_TEMP/deb-contents.txt"
+          echo "deb=rustdesk-${VERSION}-x86_64-hevc.deb" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .deb for testing and publishing
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: rustdesk/${{ steps.pkg.outputs.deb }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Install the freshly built package on clean Ubuntu images and make sure it
+  # starts. This cannot test GPU encoding (no GPU on hosted runners); it only
+  # stops a package that won't install or launch from being published.
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:22.04", "ubuntu:24.04"]
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+          path: pkg
+
+      - name: Install the package on a clean system
+        run: |
+          apt-get update -y
+          apt-get install -y ./pkg/*.deb
+
+      - name: Check every shared library resolves
+        run: |
+          # Plugins find libflutter_linux_gtk.so next to themselves at runtime.
+          export LD_LIBRARY_PATH=/usr/share/rustdesk/lib
+          missing=0
+          for f in /usr/share/rustdesk/rustdesk /usr/share/rustdesk/lib/*.so; do
+            out=$(ldd "$f" 2>&1 | grep 'not found' || true)
+            if [ -n "$out" ]; then echo "== $f"; echo "$out"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Program starts and reports its version
+        env:
+          VERSION: ${{ needs.build.outputs.deb }}
+        run: |
+          want=$(echo "$VERSION" | sed -E 's/^rustdesk-([0-9.]+)-.*/\1/')
+          got=$(env -u DISPLAY /usr/share/rustdesk/rustdesk --version)
+          echo "expected $want, got $got"
+          [ "$got" = "$want" ]
+
+      - name: Package contents look right
+        run: |
+          test -x /usr/share/rustdesk/rustdesk
+          test -f /usr/share/rustdesk/lib/librustdesk.so
+          test -f /usr/share/rustdesk/files/systemd/rustdesk.service
+          test -L /usr/bin/rustdesk
+
+  publish:
+    needs: [check, build, smoke]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+          path: pkg
 
       - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete "$TAG-hevc" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG-hevc" "rustdesk-${VERSION}-x86_64-hevc.deb" \
+          gh release create "$TAG-hevc" pkg/*.deb \
             -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "RustDesk $TAG (HEVC VA-API)" \
             --notes "Upstream RustDesk $TAG built with hwcodec's hevc_vaapi encoder re-enabled on Linux."
