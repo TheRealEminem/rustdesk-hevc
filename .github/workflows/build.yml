@@ -110,6 +110,9 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
+          # The runner image ships libunwind-14-dev, which conflicts with the
+          # libunwind-dev that libgstreamer1.0-dev pulls in.
+          sudo apt-get remove -y libunwind-14-dev || true
           sudo apt-get install -y \
             build-essential clang cmake curl gcc git g++ \
             libayatana-appindicator3-dev libasound2-dev libclang-dev \
