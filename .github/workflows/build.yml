@@ -147,6 +147,7 @@ jobs:
         with:
           workspaces: rustdesk
           prefix-key: hevc-${{ env.RUST_VERSION }}
+          cache-on-failure: true
 
       # --- flutter_rust_bridge codegen (mirrors upstream bridge.yml) ---
       - name: Install Flutter ${{ env.BRIDGE_FLUTTER_VERSION }} for bridge codegen
@@ -211,7 +212,8 @@ jobs:
           ls -l rustdesk*.deb
           DEB=$(ls rustdesk*.deb | head -1)
           mv "$DEB" "rustdesk-${VERSION}-x86_64-hevc.deb"
-          dpkg-deb -c "rustdesk-${VERSION}-x86_64-hevc.deb" | grep -q 'usr/share/rustdesk/lib/librustdesk.so'
+          dpkg-deb -c "rustdesk-${VERSION}-x86_64-hevc.deb" > "$RUNNER_TEMP/deb-contents.txt"
+          grep 'usr/share/rustdesk/lib/librustdesk.so' "$RUNNER_TEMP/deb-contents.txt"
 
       - name: Publish release
         env:
