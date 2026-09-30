@@ -25,7 +25,17 @@ curl -fL --progress-bar -o "$tmp/rustdesk.deb" "$url"
 chmod 644 "$tmp/rustdesk.deb"
 
 echo "Installing (an active RustDesk session will drop and need to reconnect)..."
-sudo apt-get install -y --allow-downgrades "$tmp/rustdesk.deb"
+# --reinstall is required: the HEVC build has the same version number as stock,
+# so plain "apt-get install" sees it as already installed and does nothing.
+sudo apt-get install -y --reinstall --allow-downgrades "$tmp/rustdesk.deb"
+
+# Verify the files on disk really came from the .deb before recording the tag.
+new_hash=$(dpkg-deb --fsys-tarfile "$tmp/rustdesk.deb" | tar -xO ./usr/share/rustdesk/lib/librustdesk.so | sha256sum | cut -d' ' -f1)
+cur_hash=$(sha256sum /usr/share/rustdesk/lib/librustdesk.so | cut -d' ' -f1)
+if [ "$new_hash" != "$cur_hash" ]; then
+  echo "ERROR: installed librustdesk.so does not match the downloaded package" >&2
+  exit 1
+fi
 echo "$tag" | sudo tee "$MARKER" >/dev/null
 sudo systemctl restart rustdesk
 echo "Done: $tag installed."
